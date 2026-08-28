@@ -968,4 +968,79 @@ mod tests {
             "record types that did not round-trip: {failures:?}"
         );
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writes_to_one_zone_do_not_clobber_each_other() {
+        use std::sync::{Arc, Mutex as StdMutex};
+
+        let mut server = mockito::Server::new_async().await;
+        let _domains = mock_example_com(&mut server);
+
+        let zone: Arc<StdMutex<Vec<Value>>> = Arc::new(StdMutex::new(Vec::new()));
+
+        let get_zone = zone.clone();
+        let _get = server
+            .mock("GET", "/domains/example.com/dns")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |_| {
+                let records = get_zone.lock().unwrap().clone();
+                std::thread::sleep(Duration::from_millis(150));
+                serde_json::to_vec(&json!({
+                    "status": 200,
+                    "data": { "domain": "example.com", "records": records }
+                }))
+                .unwrap()
+            })
+            .expect_at_least(2)
+            .create();
+
+        let put_zone = zone.clone();
+        let _put = server
+            .mock("PUT", "/domains/example.com/dns")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |req| {
+                let body: Value = serde_json::from_slice(req.body().unwrap()).unwrap();
+                let records = body["records"].as_array().cloned().unwrap_or_default();
+                *put_zone.lock().unwrap() = records;
+                serde_json::to_vec(&json!({ "status": 200 })).unwrap()
+            })
+            .expect_at_least(2)
+            .create();
+
+        let provider = setup_provider(&server.url());
+        let first = provider.set_rrset(
+            "one.example.com",
+            DnsRecordType::TXT,
+            60,
+            vec![DnsRecord::TXT("first".to_string())],
+            "example.com",
+        );
+        let second = provider.set_rrset(
+            "two.example.com",
+            DnsRecordType::TXT,
+            60,
+            vec![DnsRecord::TXT("second".to_string())],
+            "example.com",
+        );
+        let (a, b) = tokio::join!(first, second);
+        a.expect("first set_rrset failed");
+        b.expect("second set_rrset failed");
+
+        let final_zone = zone.lock().unwrap().clone();
+        let names: Vec<&str> = final_zone
+            .iter()
+            .filter_map(|record| record["name"].as_str())
+            .collect();
+
+        assert!(
+            names.contains(&"one.example.com."),
+            "the first RRSet was clobbered by the concurrent write: {names:?}"
+        );
+        assert!(
+            names.contains(&"two.example.com."),
+            "the second RRSet was clobbered by the concurrent write: {names:?}"
+        );
+    }
 }
