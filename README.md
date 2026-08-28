@@ -56,6 +56,7 @@ and over 70 cloud, registrar, and self-hosted DNS provider APIs. It was designed
 | [AWS Lightsail](https://aws.amazon.com/lightsail/) | `new_lightsail` | AWS Sigv4 |
 | [Linode](https://www.linode.com/) | `new_linode` | |
 | [LuaDNS](https://www.luadns.com/) | `new_luadns` | |
+| [mijn.host](https://mijn.host/) | `new_mijnhost` | Zone-wide read-modify-write |
 | [Mythic Beasts](https://www.mythic-beasts.com/) | `new_mythicbeasts` | OAuth2 |
 | [Namecheap](https://www.namecheap.com/) | `new_namecheap` | XML API |
 | [Name.com](https://www.name.com/) | `new_namedotcom` | |
