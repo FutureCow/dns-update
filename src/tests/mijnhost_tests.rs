@@ -811,4 +811,161 @@ mod tests {
             assert!(list(record_type).await.is_empty());
         }
     }
+
+    async fn probe_rrset(
+        provider: &MijnHostProvider,
+        owner: &str,
+        record_type: DnsRecordType,
+        records: Vec<DnsRecord>,
+        origin: &str,
+    ) -> Result<(), String> {
+        provider
+            .set_rrset(owner, record_type, 300, records.clone(), origin)
+            .await
+            .map_err(|err| format!("set_rrset: {err}"))?;
+
+        let mut got = provider
+            .list_rrset(owner, record_type, origin)
+            .await
+            .map_err(|err| format!("list_rrset: {err}"))?;
+        let mut want = records;
+        got.sort_by_key(|record| record.to_string());
+        want.sort_by_key(|record| record.to_string());
+
+        if got == want {
+            Ok(())
+        } else {
+            Err(format!(
+                "round-trip mismatch: wrote {want:?}, read back {got:?}"
+            ))
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires MIJNHOST_API_KEY and MIJNHOST_ORIGIN"]
+    async fn integration_record_type_support() {
+        let api_key = std::env::var("MIJNHOST_API_KEY").unwrap_or_default();
+        let origin = std::env::var("MIJNHOST_ORIGIN").unwrap_or_default();
+        assert!(!api_key.is_empty(), "Set MIJNHOST_API_KEY");
+        assert!(!origin.is_empty(), "Set MIJNHOST_ORIGIN (e.g. example.com)");
+
+        let run_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let base = format!("dnsupdate-poc-{run_id}");
+        let provider = MijnHostProvider::new(&api_key, Some(Duration::from_secs(30)));
+
+        let long_txt = format!("v=DKIM1; k=rsa; p={}", "A".repeat(300));
+
+        let cases: Vec<(&str, String, DnsRecordType, Vec<DnsRecord>)> = vec![
+            (
+                "TXT short",
+                format!("{base}-txt.{origin}"),
+                DnsRecordType::TXT,
+                vec![DnsRecord::TXT("simple-value".to_string())],
+            ),
+            (
+                "TXT >255 bytes",
+                format!("{base}-txtlong.{origin}"),
+                DnsRecordType::TXT,
+                vec![DnsRecord::TXT(long_txt)],
+            ),
+            (
+                "TXT multi-value",
+                format!("{base}-txtmulti.{origin}"),
+                DnsRecordType::TXT,
+                vec![
+                    DnsRecord::TXT("value-one".to_string()),
+                    DnsRecord::TXT("value-two".to_string()),
+                ],
+            ),
+            (
+                "MX",
+                format!("{base}-mx.{origin}"),
+                DnsRecordType::MX,
+                vec![DnsRecord::MX(MXRecord {
+                    priority: 10,
+                    exchange: format!("mail.{origin}"),
+                })],
+            ),
+            (
+                "CNAME",
+                format!("{base}-cname.{origin}"),
+                DnsRecordType::CNAME,
+                vec![DnsRecord::CNAME("target.example.net".to_string())],
+            ),
+            (
+                "NS",
+                format!("{base}-ns.{origin}"),
+                DnsRecordType::NS,
+                vec![DnsRecord::NS("ns1.example.net".to_string())],
+            ),
+            (
+                "SRV",
+                format!("_sip._tcp.{base}-srv.{origin}"),
+                DnsRecordType::SRV,
+                vec![DnsRecord::SRV(SRVRecord {
+                    priority: 10,
+                    weight: 20,
+                    port: 5060,
+                    target: format!("sip.{origin}"),
+                })],
+            ),
+            (
+                "TLSA",
+                format!("_25._tcp.{base}-tlsa.{origin}"),
+                DnsRecordType::TLSA,
+                vec![DnsRecord::TLSA(TLSARecord {
+                    cert_usage: TlsaCertUsage::DaneEe,
+                    selector: TlsaSelector::Spki,
+                    matching: TlsaMatching::Sha256,
+                    cert_data: vec![0xde, 0xad, 0xbe, 0xef],
+                })],
+            ),
+            (
+                "CAA",
+                format!("{base}-caa.{origin}"),
+                DnsRecordType::CAA,
+                vec![DnsRecord::CAA(CAARecord::Issue {
+                    issuer_critical: false,
+                    name: Some("letsencrypt.org".to_string()),
+                    options: vec![],
+                })],
+            ),
+        ];
+
+        let mut results = Vec::new();
+        for (label, owner, record_type, records) in cases {
+            let outcome = probe_rrset(&provider, &owner, record_type, records, &origin).await;
+
+            if let Err(err) = provider
+                .set_rrset(owner.as_str(), record_type, 0, vec![], origin.as_str())
+                .await
+            {
+                println!("warning: could not clean up {owner}: {err}");
+            }
+
+            results.push((label, outcome));
+        }
+
+        println!("\nmijn.host record type support for {origin}:");
+        for (label, outcome) in &results {
+            match outcome {
+                Ok(()) => println!("  {label:<16} OK"),
+                Err(err) => println!("  {label:<16} FAILED   {err}"),
+            }
+        }
+        println!();
+
+        let failures: Vec<&str> = results
+            .iter()
+            .filter(|(_, outcome)| outcome.is_err())
+            .map(|(label, _)| *label)
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "record types that did not round-trip: {failures:?}"
+        );
+    }
 }
