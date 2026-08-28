@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file. This projec
 
 ### Added
 - mijn.host support.
+- mijn.host: serialize zone writes so concurrent RRset updates cannot clobber each other.
 
 ### Changed
 - Replaced `base64` with `encodify`.
