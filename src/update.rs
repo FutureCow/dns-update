@@ -72,6 +72,7 @@ use crate::{
         lightsail::{LightsailConfig, LightsailProvider},
         linode::LinodeProvider,
         luadns::LuaDnsProvider,
+        mijnhost::MijnHostProvider,
         mythicbeasts::MythicBeastsProvider,
         namecheap::NamecheapProvider,
         namedotcom::NameDotComProvider,
@@ -798,6 +799,16 @@ impl DnsUpdater {
         Ok(DnsUpdater::Infoblox(InfobloxProvider::new(config)?))
     }
 
+    /// Create a new DNS updater using the mijn.host API.
+    pub fn new_mijnhost(
+        api_key: impl AsRef<str>,
+        timeout: Option<Duration>,
+    ) -> crate::Result<Self> {
+        Ok(DnsUpdater::MijnHost(MijnHostProvider::new(
+            api_key, timeout,
+        )))
+    }
+
     /// Create a new DNS updater using the Pebble Challenge Test Server.
     #[cfg(feature = "test_provider")]
     pub fn new_pebble(base_url: impl AsRef<str>, timeout: Option<Duration>) -> Self {
@@ -1171,6 +1182,11 @@ impl DnsUpdater {
                     .await
             }
             DnsUpdater::Infoblox(provider) => {
+                provider
+                    .set_rrset(name, record_type, ttl, records, origin)
+                    .await
+            }
+            DnsUpdater::MijnHost(provider) => {
                 provider
                     .set_rrset(name, record_type, ttl, records, origin)
                     .await
@@ -1555,6 +1571,11 @@ impl DnsUpdater {
                     .add_to_rrset(name, record_type, ttl, records, origin)
                     .await
             }
+            DnsUpdater::MijnHost(provider) => {
+                provider
+                    .add_to_rrset(name, record_type, ttl, records, origin)
+                    .await
+            }
             #[cfg(feature = "test_provider")]
             DnsUpdater::Pebble(provider) => {
                 provider
@@ -1934,6 +1955,11 @@ impl DnsUpdater {
                     .remove_from_rrset(name, record_type, records, origin)
                     .await
             }
+            DnsUpdater::MijnHost(provider) => {
+                provider
+                    .remove_from_rrset(name, record_type, records, origin)
+                    .await
+            }
             #[cfg(feature = "test_provider")]
             DnsUpdater::Pebble(provider) => {
                 provider
@@ -2066,6 +2092,7 @@ impl DnsUpdater {
             DnsUpdater::EdgeDns(provider) => provider.list_rrset(name, record_type, origin).await,
             DnsUpdater::UltraDns(provider) => provider.list_rrset(name, record_type, origin).await,
             DnsUpdater::Infoblox(provider) => provider.list_rrset(name, record_type, origin).await,
+            DnsUpdater::MijnHost(provider) => provider.list_rrset(name, record_type, origin).await,
             #[cfg(feature = "test_provider")]
             DnsUpdater::Pebble(provider) => provider.list_rrset(name, record_type, origin).await,
             #[cfg(feature = "test_provider")]

@@ -1,5 +1,6 @@
 dns-update 0.5.6
 ================================
+- mijn.host support.
 - Simply.com support.
 - Plesk: identify the zone with the `domain` query parameter the REST API requires instead of a `site_id` field.
 - NameSilo: clamp the TTL to the range the API accepts and strip the trailing dot from records.

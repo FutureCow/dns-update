@@ -57,6 +57,7 @@ pub mod joker;
 pub mod lightsail;
 pub mod linode;
 pub mod luadns;
+pub mod mijnhost;
 pub mod mythicbeasts;
 pub mod namecheap;
 pub mod namedotcom;
