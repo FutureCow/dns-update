@@ -30,6 +30,7 @@ pub struct MijnHostProvider {
     client: HttpClient,
     endpoint: String,
     zones: Arc<Mutex<HashMap<String, (String, Instant)>>>,
+    zone_locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -110,6 +111,7 @@ impl MijnHostProvider {
             client,
             endpoint: DEFAULT_API_ENDPOINT.to_string(),
             zones: Arc::new(Mutex::new(HashMap::new())),
+            zone_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -119,6 +121,15 @@ impl MijnHostProvider {
             endpoint: endpoint.as_ref().to_string(),
             ..self
         }
+    }
+
+    fn zone_lock(&self, domain: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.zone_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(domain.to_string())
+            .or_default()
+            .clone()
     }
 
     async fn resolve_domain(&self, origin: &str) -> crate::Result<String> {
@@ -205,6 +216,8 @@ impl MijnHostProvider {
         let origin = origin.into_name().to_ascii_lowercase();
         let owner = name.into_name().to_ascii_lowercase();
         let domain = self.resolve_domain(&origin).await?;
+        let zone_lock = self.zone_lock(&domain);
+        let _guard = zone_lock.lock().await;
         let rr_type = record_type.as_str();
         let ttl = ttl.min(MIJNHOST_MAX_TTL);
         let desired = build_values(record_type, records)?;
@@ -256,6 +269,8 @@ impl MijnHostProvider {
         let origin = origin.into_name().to_ascii_lowercase();
         let owner = name.into_name().to_ascii_lowercase();
         let domain = self.resolve_domain(&origin).await?;
+        let zone_lock = self.zone_lock(&domain);
+        let _guard = zone_lock.lock().await;
         let rr_type = record_type.as_str();
         let ttl = ttl.min(MIJNHOST_MAX_TTL);
         let desired = build_values(record_type, records)?;
@@ -301,6 +316,8 @@ impl MijnHostProvider {
         let origin = origin.into_name().to_ascii_lowercase();
         let owner = name.into_name().to_ascii_lowercase();
         let domain = self.resolve_domain(&origin).await?;
+        let zone_lock = self.zone_lock(&domain);
+        let _guard = zone_lock.lock().await;
         let rr_type = record_type.as_str();
         let to_remove = build_values(record_type, records)?;
 

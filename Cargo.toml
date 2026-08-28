@@ -38,7 +38,7 @@ test_provider = []
 
 [dependencies]
 encodify = "1.0"
-tokio = { version = "1.52", features = ["rt", "net"] }
+tokio = { version = "1.52", features = ["rt", "net", "sync"] }
 hex = { version = "0.4.3", default-features = false, features = ["std"] }
 hickory-net = { version = "0.26.3", default-features = false }
 hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
