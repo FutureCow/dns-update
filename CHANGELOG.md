@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file. This projec
 
 ## [0.5.10] - 2026-09-XX
 
+### Added
+- mijn.host support.
+
 ### Changed
 - Replaced `base64` with `encodify`.
 
