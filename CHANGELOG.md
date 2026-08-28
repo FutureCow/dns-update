@@ -1,6 +1,7 @@
 dns-update 0.5.6
 ================================
 - mijn.host support.
+- mijn.host: serialize zone writes so concurrent RRset updates cannot clobber each other.
 - Simply.com support.
 - Plesk: identify the zone with the `domain` query parameter the REST API requires instead of a `site_id` field.
 - NameSilo: clamp the TTL to the range the API accepts and strip the trailing dot from records.
