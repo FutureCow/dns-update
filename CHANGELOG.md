@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file. This projec
 ### Added
 - mijn.host support.
 - mijn.host: serialize zone writes so concurrent RRset updates cannot clobber each other.
+- mijn.host: only rewrite a zone from a listing that two consecutive reads agree on, and wait for the listing to reflect each write.
 
 ### Changed
 - Replaced `base64` with `encodify`.

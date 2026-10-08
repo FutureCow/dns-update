@@ -63,7 +63,7 @@ mod tests {
                 })
                 .to_string(),
             )
-            .expect(times)
+            .expect_at_least(times)
             .create()
     }
 
@@ -570,6 +570,7 @@ mod tests {
                 })
                 .to_string(),
             )
+            .expect_at_least(1)
             .create();
 
         let provider = setup_provider(&server.url());
@@ -966,6 +967,203 @@ mod tests {
         assert!(
             failures.is_empty(),
             "record types that did not round-trip: {failures:?}"
+        );
+    }
+
+    fn mock_get_records_sequence(server: &mut ServerGuard, listings: Vec<Value>) -> Mock {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        server
+            .mock("GET", "/domains/example.com/dns")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |_| {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let records = &listings[call.min(listings.len() - 1)];
+                serde_json::to_vec(&json!({
+                    "status": 200,
+                    "data": { "domain": "example.com", "records": records }
+                }))
+                .unwrap()
+            })
+            .expect_at_least(1)
+            .create()
+    }
+
+    #[tokio::test]
+    async fn set_rrset_waits_out_a_transiently_empty_zone_listing() {
+        let mut server = mockito::Server::new_async().await;
+        let _domains = mock_example_com(&mut server);
+
+        let existing = json!([
+            { "type": "A", "name": "example.com.", "value": "192.0.2.1", "ttl": 300 },
+            { "type": "A", "name": "www.example.com.", "value": "192.0.2.1", "ttl": 300 }
+        ]);
+        let _get = mock_get_records_sequence(
+            &mut server,
+            vec![json!([]), json!([]), json!([]), existing.clone()],
+        );
+        let put = mock_put_records(
+            &mut server,
+            json!([
+                { "type": "A", "name": "example.com.", "value": "192.0.2.1", "ttl": 300 },
+                { "type": "A", "name": "www.example.com.", "value": "192.0.2.1", "ttl": 300 },
+                { "type": "TXT", "name": "example.com.", "value": "v=spf1 mx -all", "ttl": 60 }
+            ]),
+        );
+
+        let provider = setup_provider(&server.url());
+        provider
+            .set_rrset(
+                "example.com",
+                DnsRecordType::TXT,
+                60,
+                vec![DnsRecord::TXT("v=spf1 mx -all".to_string())],
+                "example.com",
+            )
+            .await
+            .expect("set_rrset failed");
+
+        put.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn set_rrset_writes_nothing_while_the_zone_listing_keeps_changing() {
+        let mut server = mockito::Server::new_async().await;
+        let _domains = mock_example_com(&mut server);
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _get = server
+            .mock("GET", "/domains/example.com/dns")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |_| {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                serde_json::to_vec(&json!({
+                    "status": 200,
+                    "data": { "domain": "example.com", "records": [
+                        { "type": "A", "name": "example.com.", "value": format!("192.0.2.{call}"), "ttl": 300 }
+                    ] }
+                }))
+                .unwrap()
+            })
+            .expect_at_least(2)
+            .create();
+        let put = server
+            .mock("PUT", "/domains/example.com/dns")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "status": 200 }).to_string())
+            .expect(0)
+            .create();
+
+        let provider = setup_provider(&server.url());
+        let result = provider
+            .set_rrset(
+                "example.com",
+                DnsRecordType::TXT,
+                60,
+                vec![DnsRecord::TXT("v=spf1 mx -all".to_string())],
+                "example.com",
+            )
+            .await;
+
+        assert!(
+            matches!(&result, Err(Error::Api(message)) if message.contains("kept changing")),
+            "expected a refusal, got {result:?}"
+        );
+        put.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn back_to_back_writes_survive_a_lagging_zone_listing() {
+        use std::sync::{Arc, Mutex as StdMutex};
+
+        let mut server = mockito::Server::new_async().await;
+        let _domains = mock_example_com(&mut server);
+
+        let zone: Arc<StdMutex<Vec<Value>>> = Arc::new(StdMutex::new(vec![
+            json!({ "type": "A", "name": "example.com.", "value": "192.0.2.1", "ttl": 300 }),
+            json!({ "type": "A", "name": "www.example.com.", "value": "192.0.2.1", "ttl": 300 }),
+        ]));
+        let stale_reads: Arc<StdMutex<usize>> = Arc::new(StdMutex::new(0));
+
+        let get_zone = zone.clone();
+        let get_stale = stale_reads.clone();
+        let _get = server
+            .mock("GET", "/domains/example.com/dns")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |_| {
+                let mut stale = get_stale.lock().unwrap();
+                let records = if *stale > 0 {
+                    *stale -= 1;
+                    Vec::new()
+                } else {
+                    get_zone.lock().unwrap().clone()
+                };
+                serde_json::to_vec(&json!({
+                    "status": 200,
+                    "data": { "domain": "example.com", "records": records }
+                }))
+                .unwrap()
+            })
+            .expect_at_least(2)
+            .create();
+
+        let put_zone = zone.clone();
+        let put_stale = stale_reads.clone();
+        let _put = server
+            .mock("PUT", "/domains/example.com/dns")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |req| {
+                let body: Value = serde_json::from_slice(req.body().unwrap()).unwrap();
+                *put_zone.lock().unwrap() = body["records"].as_array().cloned().unwrap_or_default();
+                *put_stale.lock().unwrap() = 3;
+                serde_json::to_vec(&json!({ "status": 200 })).unwrap()
+            })
+            .expect(3)
+            .create();
+
+        let provider = setup_provider(&server.url());
+        for (name, value) in [
+            ("example.com", "v=spf1 mx -all"),
+            ("_dmarc.example.com", "v=DMARC1; p=reject"),
+            ("_mta-sts.example.com", "v=STSv1; id=1"),
+        ] {
+            provider
+                .set_rrset(
+                    name,
+                    DnsRecordType::TXT,
+                    60,
+                    vec![DnsRecord::TXT(value.to_string())],
+                    "example.com",
+                )
+                .await
+                .expect("set_rrset failed");
+        }
+
+        let final_zone = zone.lock().unwrap().clone();
+        let mut names: Vec<String> = final_zone
+            .iter()
+            .map(|record| {
+                format!(
+                    "{} {}",
+                    record["type"].as_str().unwrap(),
+                    record["name"].as_str().unwrap()
+                )
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "A example.com.",
+                "A www.example.com.",
+                "TXT _dmarc.example.com.",
+                "TXT _mta-sts.example.com.",
+                "TXT example.com.",
+            ]
         );
     }
 
