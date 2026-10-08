@@ -57,6 +57,7 @@ pub mod lib_tests;
 pub mod lightsail_tests;
 pub mod linode_tests;
 pub mod luadns_tests;
+pub mod mijnhost_tests;
 pub mod mythicbeasts_tests;
 pub mod namecheap_tests;
 pub mod namedotcom_tests;
