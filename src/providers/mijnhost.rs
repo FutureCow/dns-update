@@ -35,6 +35,7 @@ pub struct MijnHostProvider {
     endpoint: String,
     zones: Arc<Mutex<HashMap<String, (String, Instant)>>>,
     zone_locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    zone_sizes: Arc<Mutex<HashMap<String, usize>>>,
     settle_interval: Duration,
 }
 
@@ -69,7 +70,6 @@ struct ApiResponse<T> {
 
 #[derive(Deserialize)]
 struct RecordsData {
-    #[serde(default)]
     records: Vec<Record>,
 }
 
@@ -117,6 +117,7 @@ impl MijnHostProvider {
             endpoint: DEFAULT_API_ENDPOINT.to_string(),
             zones: Arc::new(Mutex::new(HashMap::new())),
             zone_locks: Arc::new(Mutex::new(HashMap::new())),
+            zone_sizes: Arc::new(Mutex::new(HashMap::new())),
             settle_interval: SETTLE_INTERVAL,
         }
     }
@@ -137,6 +138,25 @@ impl MijnHostProvider {
             .entry(domain.to_string())
             .or_default()
             .clone()
+    }
+
+    fn known_zone_size(&self, domain: &str) -> Option<usize> {
+        self.zone_sizes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(domain)
+            .copied()
+    }
+
+    fn remember_zone_size(&self, domain: &str, size: Option<usize>) {
+        let mut sizes = self
+            .zone_sizes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match size {
+            Some(size) => sizes.insert(domain.to_string(), size),
+            None => sizes.remove(domain),
+        };
     }
 
     async fn resolve_domain(&self, origin: &str) -> crate::Result<String> {
@@ -195,17 +215,21 @@ impl MijnHostProvider {
     }
 
     async fn settled_zone_records(&self, domain: &str) -> crate::Result<Vec<Record>> {
+        let known_size = self.known_zone_size(domain);
+        let required_reads = |records: &[Record]| {
+            if records.is_empty() || known_size.is_some_and(|known| records.len() < known) {
+                MATCHING_EMPTY_READS
+            } else {
+                MATCHING_READS
+            }
+        };
+
         let mut records = self.zone_records(domain).await?;
         let mut matching_reads = 1;
 
         for _ in 0..SETTLE_ATTEMPTS {
-            let required = if records.is_empty() {
-                MATCHING_EMPTY_READS
-            } else {
-                MATCHING_READS
-            };
-            if matching_reads >= required {
-                return Ok(records);
+            if matching_reads >= required_reads(&records) {
+                break;
             }
 
             tokio::time::sleep(self.settle_interval).await;
@@ -218,32 +242,63 @@ impl MijnHostProvider {
             }
         }
 
-        Err(Error::Api(format!(
-            "Zone {domain} kept changing while it was being read, nothing was written"
-        )))
-    }
-
-    async fn replace_zone_records(&self, domain: &str, records: &[Record]) -> crate::Result<()> {
-        self.put_zone_records(domain, records).await?;
-
-        let mut previous: Option<Vec<Record>> = None;
-        for _ in 0..SETTLE_ATTEMPTS {
-            tokio::time::sleep(self.settle_interval).await;
-            let current = self.zone_records(domain).await?;
-            if current.len() == records.len() {
-                return Ok(());
-            }
-            previous = Some(current);
-        }
-
-        let last = self.zone_records(domain).await?;
-        if previous.is_some_and(|previous| same_zone(&previous, &last)) {
-            Ok(())
+        if matching_reads >= required_reads(&records) {
+            self.remember_zone_size(domain, Some(records.len()));
+            Ok(records)
         } else {
             Err(Error::Api(format!(
-                "Zone {domain} did not settle after it was updated"
+                "Zone {domain} kept changing while it was being read, nothing was written"
             )))
         }
+    }
+
+    async fn replace_zone_records(
+        &self,
+        domain: &str,
+        before: &[Record],
+        after: &[Record],
+    ) -> crate::Result<()> {
+        self.put_zone_records(domain, after).await?;
+
+        let mut listing = Vec::new();
+        for _ in 0..SETTLE_ATTEMPTS {
+            tokio::time::sleep(self.settle_interval).await;
+            listing = self.zone_records(domain).await?;
+            if listing.len() == after.len()
+                && after
+                    .iter()
+                    .all(|record| contains_record(&listing, record, domain))
+            {
+                self.remember_zone_size(domain, Some(after.len()));
+                return Ok(());
+            }
+        }
+
+        tokio::time::sleep(self.settle_interval).await;
+        let settled = self.zone_records(domain).await?;
+        if !same_zone(&listing, &settled) {
+            self.remember_zone_size(domain, None);
+            return Err(Error::Api(format!(
+                "Zone {domain} did not settle after it was updated"
+            )));
+        }
+
+        let lost = after
+            .iter()
+            .filter(|record| {
+                contains_record(before, record, domain)
+                    && !contains_record(&settled, record, domain)
+            })
+            .count();
+        if lost > 0 {
+            self.remember_zone_size(domain, None);
+            return Err(Error::Api(format!(
+                "{lost} records that were not being changed are missing from zone {domain} after the update"
+            )));
+        }
+
+        self.remember_zone_size(domain, Some(settled.len()));
+        Ok(())
     }
 
     async fn put_zone_records(&self, domain: &str, records: &[Record]) -> crate::Result<()> {
@@ -281,9 +336,10 @@ impl MijnHostProvider {
         let ttl = ttl.min(MIJNHOST_MAX_TTL);
         let desired = build_values(record_type, records)?;
 
+        let before = self.settled_zone_records(&domain).await?;
         let mut kept = Vec::new();
         let mut matched = Vec::new();
-        for record in self.settled_zone_records(&domain).await? {
+        for record in before.iter().cloned() {
             if matches_owner(&record, rr_type, &owner, &domain) {
                 matched.push(record);
             } else {
@@ -310,7 +366,7 @@ impl MijnHostProvider {
             });
         }
 
-        self.replace_zone_records(&domain, &kept).await
+        self.replace_zone_records(&domain, &before, &kept).await
     }
 
     pub(crate) async fn add_to_rrset(
@@ -334,7 +390,8 @@ impl MijnHostProvider {
         let ttl = ttl.min(MIJNHOST_MAX_TTL);
         let desired = build_values(record_type, records)?;
 
-        let mut all = self.settled_zone_records(&domain).await?;
+        let before = self.settled_zone_records(&domain).await?;
+        let mut all = before.clone();
         let additions: Vec<String> = desired
             .into_iter()
             .filter(|value| {
@@ -358,7 +415,7 @@ impl MijnHostProvider {
             });
         }
 
-        self.replace_zone_records(&domain, &all).await
+        self.replace_zone_records(&domain, &before, &all).await
     }
 
     pub(crate) async fn remove_from_rrset(
@@ -380,11 +437,26 @@ impl MijnHostProvider {
         let rr_type = record_type.as_str();
         let to_remove = build_values(record_type, records)?;
 
-        for record in self.settled_zone_records(&domain).await? {
-            if matches_owner(&record, rr_type, &owner, &domain)
+        let is_target = |record: &Record| {
+            matches_owner(record, rr_type, &owner, &domain)
                 && to_remove.iter().any(|value| value == &record.value)
-            {
+        };
+
+        let mut deleted = false;
+        for record in self.settled_zone_records(&domain).await? {
+            if is_target(&record) {
                 self.delete_zone_record(&domain, &record).await?;
+                deleted = true;
+            }
+        }
+
+        if deleted {
+            self.remember_zone_size(&domain, None);
+            for _ in 0..SETTLE_ATTEMPTS {
+                tokio::time::sleep(self.settle_interval).await;
+                if !self.zone_records(&domain).await?.iter().any(is_target) {
+                    break;
+                }
             }
         }
 
@@ -400,6 +472,8 @@ impl MijnHostProvider {
         let origin = origin.into_name().to_ascii_lowercase();
         let owner = name.into_name().to_ascii_lowercase();
         let domain = self.resolve_domain(&origin).await?;
+        let zone_lock = self.zone_lock(&domain);
+        let _guard = zone_lock.lock().await;
         let rr_type = record_type.as_str();
 
         self.settled_zone_records(&domain)
@@ -429,6 +503,16 @@ fn same_zone(a: &[Record], b: &[Record]) -> bool {
     }
 
     a.len() == b.len() && sorted(a) == sorted(b)
+}
+
+fn contains_record(listing: &[Record], record: &Record, domain: &str) -> bool {
+    listing.iter().any(|candidate| {
+        candidate
+            .record_type
+            .eq_ignore_ascii_case(&record.record_type)
+            && candidate.value == record.value
+            && normalize_name(&candidate.name, domain) == normalize_name(&record.name, domain)
+    })
 }
 
 fn normalize_name(name: &str, domain: &str) -> String {
