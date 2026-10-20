@@ -12,7 +12,7 @@
 use crate::utils::{build_caa, parse_mx, parse_srv, parse_tlsa, strip_trailing_dot, unquote_txt};
 use crate::{
     DnsRecord, DnsRecordType, Error, IntoFqdn,
-    http::{HttpClient, HttpClientBuilder},
+    http::{HttpClient, HttpClientBuilder, body_snippet},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -91,7 +91,7 @@ impl<T> ApiResponse<T> {
                 "Failed to {action}: {}",
                 self.status_description
                     .as_deref()
-                    .unwrap_or("no status description")
+                    .map_or("no status description", body_snippet)
             )))
         } else {
             Ok(())
