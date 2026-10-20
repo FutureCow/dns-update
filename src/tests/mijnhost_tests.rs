@@ -13,7 +13,7 @@
 mod tests {
     use crate::{
         CAARecord, DnsRecord, DnsRecordType, Error, MXRecord, SRVRecord, TLSARecord, TlsaCertUsage,
-        TlsaMatching, TlsaSelector, providers::mijnhost::MijnHostProvider,
+        TlsaMatching, TlsaSelector, http::MAX_BODY_SNIPPET, providers::mijnhost::MijnHostProvider,
     };
     use mockito::{Matcher, Mock, ServerGuard};
     use serde_json::{Value, json};
@@ -1469,6 +1469,84 @@ mod tests {
         assert!(
             names.contains(&"two.example.com."),
             "the second RRSet was clobbered by the concurrent write: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_an_error_and_is_not_followed() {
+        let target = std::net::TcpListener::bind("127.0.0.1:0").expect("bind redirect target");
+        target.set_nonblocking(true).expect("nonblocking target");
+        let location = format!("http://{}/domains", target.local_addr().expect("addr"));
+
+        let mut server = mockito::Server::new_async().await;
+        let _domains = server
+            .mock("GET", "/domains")
+            .with_status(302)
+            .with_header("location", &location)
+            .expect(1)
+            .create();
+
+        let provider = setup_provider(&server.url());
+        let result = provider
+            .set_rrset(
+                "example.com",
+                DnsRecordType::TXT,
+                60,
+                vec![DnsRecord::TXT("v=spf1 mx -all".to_string())],
+                "example.com",
+            )
+            .await;
+
+        assert!(
+            matches!(&result, Err(Error::Api(message)) if message.starts_with("HTTP 302")),
+            "expected the redirect to be reported, got {result:?}"
+        );
+        match target.accept() {
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok((_, peer)) => panic!("redirect target received a connection from {peer}"),
+            Err(err) => panic!("unexpected accept error: {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_long_status_description_is_capped_in_the_error() {
+        let mut server = mockito::Server::new_async().await;
+        let description = "é".repeat(MAX_BODY_SNIPPET * 4);
+        let _domains = server
+            .mock("GET", "/domains")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({ "status": 400, "status_description": description, "data": null })
+                    .to_string(),
+            )
+            .expect(1)
+            .create();
+
+        let provider = setup_provider(&server.url());
+        let result = provider
+            .set_rrset(
+                "example.com",
+                DnsRecordType::TXT,
+                60,
+                vec![DnsRecord::TXT("v=spf1 mx -all".to_string())],
+                "example.com",
+            )
+            .await;
+
+        let Err(Error::Api(message)) = result else {
+            panic!("expected an API error, got {result:?}");
+        };
+        let kept = message.chars().filter(|c| *c == 'é').count() * 'é'.len_utf8();
+        assert!(
+            kept <= MAX_BODY_SNIPPET,
+            "{} bytes of the description kept",
+            kept
+        );
+        assert!(
+            message.len() < MAX_BODY_SNIPPET + 64,
+            "len {}",
+            message.len()
         );
     }
 }
