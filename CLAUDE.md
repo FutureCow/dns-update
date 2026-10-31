@@ -72,12 +72,12 @@ For a vanilla token-based REST provider, follow `digitalocean.rs` or
    - Add a `new_<name>(...)` constructor.
    - Add match arms in `set_rrset` / `add_to_rrset` / `remove_from_rrset` /
      `list_rrset`.
-6. Add a row to the provider table in `README.md`.
 5. Write `src/tests/<name>_tests.rs` and register the module in
    `src/tests/mod.rs`. Use `mockito::Server::new_async()` for unit tests; the
    existing `cloudflare_tests.rs` is the canonical example. Also include a
    `#[ignore = "..."]` integration test that hits the real API behind env
    vars, again like cloudflare.
+6. Add a row to the provider table in `README.md`.
 
 ### Conventions
 
@@ -266,10 +266,10 @@ Feature-gated to use `aws-lc-rs` (default) or `ring`:
 
 - `sha1_digest(&[u8]) -> Vec<u8>`.
 - `sha256_digest(&[u8]) -> Vec<u8>`.
+- `hmac_sha1(key, data) -> Vec<u8>`.
 - `hmac_sha256(key, data) -> Vec<u8>`.
 
-If you need HMAC-SHA1 (websupport, dnsmadeeasy, constellix), add an
-`hmac_sha1` helper here (single function); do not duplicate the cfg dance
+Add new primitives here as a single function; do not duplicate the cfg dance
 across providers.
 
 ### `src/jwt.rs`
