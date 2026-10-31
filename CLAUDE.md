@@ -353,3 +353,32 @@ If you need a current timestamp for HTTP signing, look at how Route53 does it
 
 - User-visible changes get an entry in `CHANGELOG.md`.
 - License: dual Apache-2.0 / MIT. New files keep the existing header.
+
+## This fork: the mijn.host provider
+
+This clone is `FutureCow/dns-update`, a fork that adds `src/providers/mijnhost.rs` for Stalwart.
+Server state and the Stalwart side of the port are in `c:\dev\stalwart-alpine\CLAUDE.md`.
+
+- Current branch: `mijnhost-0.6.0`, on upstream v0.6.0. The Stalwart fork pins commit `8d16422`.
+- Each upstream version gets a new `mijnhost-<version>` branch with the mijn.host commits
+  cherry-picked. Force-pushes are blocked, and never rewrite a branch a Stalwart lock file pins.
+- `mijnhost-provider` is a single squashed commit on an older base, kept for reference. An upstream
+  PR is the owner's decision and has to state that the code was written by Claude.
+
+Provider behaviour worth keeping when changing it:
+
+- The API has no record ids or conditional updates: every write is a GET and a PUT of the whole zone,
+  serialized per zone by an async mutex. Nothing protects against another process, and Caddy's
+  mijn.host plugin writes the same zones.
+- After a PUT the listing is briefly empty or partial. On 2026-10-08 that wiped the unrelated records
+  of a live zone. So a write starts from a settled read (`settled_zone_records`: two agreeing reads,
+  six if empty or smaller than the last known size), and `replace_zone_records` waits until the listing
+  holds what was written and reports untouched records that went missing.
+- A listing without a `records` field is an error, never an empty zone.
+- Errors built from `status_description` are capped with `body_snippet`, like the shared HTTP client.
+
+Tests: the mock tests in `src/tests/mijnhost_tests.rs` run with `cargo test`. Each regression test there
+guards a real failure; keep them red-then-green when touching this code. The live tests are `#[ignore]`d
+and read `MIJNHOST_API_KEY` and `MIJNHOST_ORIGIN`; the owner runs them, the key is never shared. For
+dns-01, the TTL must stay shorter than the propagation timeout (working: TTL 60 s, timeout 5 min,
+polling 15 s, delay 10 s).
